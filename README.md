@@ -19,5 +19,16 @@ Ride-tracking apps often stop updating when the user loses network access. This 
 - GPS/location services
 - Maps integration
 
+## Prediction Logic
+
+When offline, the app estimates the next cab location using:
+
+- Last known GPS coordinates
+- Last recorded speed
+- Direction of movement
+- Time elapsed since connection loss
+
+The confidence score decreases as offline duration increases.
+
 ## How It Works
 Online GPS → Save last known location, speed, direction → Network drops → Predict next location → Show confidence level
