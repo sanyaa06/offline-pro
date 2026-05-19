@@ -1,35 +1,23 @@
-Offline Ride Tracker
+# Offline Ride Tracker
 
-A smart ride-tracking system that continues to estimate and monitor cab movement even when internet connectivity is lost.
-Built to solve a real-world issue where users lose visibility of their ride when network drops.
+A Flutter-based ride tracking system that continues estimating cab movement even when internet connectivity is lost.
 
-This project introduces an Offline Ride Tracking System that:
+## Problem
+Ride-tracking apps often stop updating when the user loses network access. This project solves that by switching from real-time GPS tracking to predictive offline tracking.
 
-Uses real-time GPS when online
-Switches to predictive tracking when offline
-Estimates vehicle movement using previous trajectory
-Displays confidence level for predictions
-Detects route deviation from expected path
+## Features
+- Real-time GPS tracking in online mode
+- Predictive movement when offline
+- Uses last known speed, direction, and time elapsed
+- Confidence level: High / Medium / Low
+- Route deviation detection
+- Manual testing mode for offline simulation
 
-Features
+## Tech Stack
+- Flutter
+- Dart
+- GPS/location services
+- Maps integration
 
-🟢 Online Mode
-Real-time GPS tracking
-Accurate location updates
-Live map rendering
-
-🔴 Offline Mode
-Predicts vehicle movement based on:
-Last known direction
-Speed
-Time elapsed
-Continues updating location without internet
-
-📍 Smart Tracking
-Route deviation detection
-Confidence indicator (High / Medium / Low)
-Smooth transition between online ↔ offline modes
-
-🧪 Testing Mode
-Manual toggle for network simulation
-“Move Forward” button for demo/testing
+## How It Works
+Online GPS → Save last known location, speed, direction → Network drops → Predict next location → Show confidence level
