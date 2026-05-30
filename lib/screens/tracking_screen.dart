@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
-import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
+import 'package:flutter/painting.dart';
+import 'package:geolocator/geolocator.dart';
 
 // Import our newly separated basic architecture logic context!
 import '../services/location_service.dart';
@@ -28,12 +31,42 @@ class _TrackingScreenState extends State<TrackingScreen> {
   bool isOffline = false;
   int offlineSteps = 0;
   bool onRoute = true;
+  final MapController _mapController = MapController();
+  final double _mapZoom = 15;
 
-  GoogleMapController? _mapController;
+  Future<void> _getCurrentLocation() async {
+  bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+
+  if (!serviceEnabled) {
+    return;
+  }
+
+  LocationPermission permission = await Geolocator.checkPermission();
+
+  if (permission == LocationPermission.denied) {
+    permission = await Geolocator.requestPermission();
+  }
+
+  Position position = await Geolocator.getCurrentPosition(
+    desiredAccuracy: LocationAccuracy.high,
+  );
+
+  setState(() {
+    latitude = position.latitude;
+    longitude = position.longitude;
+  });
+
+  _mapController.move(
+    LatLng(latitude, longitude),
+    _mapZoom,
+  );
+}
 
   @override
-  void initState() {
-    super.initState();
+  @override
+void initState() {
+  super.initState();
+  _getCurrentLocation();
     // We defer to the DeviationService internally to fetch layout mappings securely
     _deviationService.loadRoute().then((_) {
       if (mounted) {
@@ -42,6 +75,23 @@ class _TrackingScreenState extends State<TrackingScreen> {
         });
       }
     });
+  }
+
+  Future<void> _clearTileCache() async {
+    // Clear Flutter image cache
+    try {
+      PaintingBinding.instance.imageCache.clear();
+    } catch (e) {
+      debugPrint('ImageCache clear failed: $e');
+    }
+
+    // Note: If using flutter_map_tile_caching (FMTC), clear it here.
+    // Example (replace with FMTC API if used):
+    // await FMTC.instance('mapStore').manage.clearAll();
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Tile cache cleared')));
+    }
   }
 
   /// 6. Maintain Data Pipeline synchronously via simple decoupled methods
@@ -64,9 +114,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
     });
 
     // 5. Update Map UI externally
-    _mapController?.animateCamera(
-      CameraUpdate.newLatLng(LatLng(latitude, longitude)),
-    );
+    _mapController.move(LatLng(latitude, longitude), _mapZoom);
   }
 
   /// System logic toggling testing fallback conditions natively
@@ -78,10 +126,6 @@ class _TrackingScreenState extends State<TrackingScreen> {
         onRoute = _deviationService.isOnRoute(latitude, longitude);
       }
     });
-  }
-
-  void _onMapCreated(GoogleMapController controller) {
-    _mapController = controller;
   }
 
   @override
@@ -148,34 +192,50 @@ class _TrackingScreenState extends State<TrackingScreen> {
                           child: const Padding(
                             padding: EdgeInsets.all(24.0),
                             child: Text(
-                              "Map not supported on web. Use mobile device.", 
+                              "Map not supported on web. Use mobile device.",
                               style: TextStyle(fontWeight: FontWeight.bold, color: Colors.black54),
                               textAlign: TextAlign.center,
                             ),
                           ),
                         )
                       else
-                        GoogleMap(
-                          onMapCreated: _onMapCreated,
-                          initialCameraPosition: CameraPosition(
-                            target: LatLng(latitude, longitude),
-                            zoom: 15,
+                        FlutterMap(
+                          mapController: _mapController,
+                          options: MapOptions(
+                            initialCenter: LatLng(latitude, longitude),
+                            initialZoom: _mapZoom,
                           ),
-                          markers: {
-                            Marker(
-                              markerId: const MarkerId("currentLocation"),
-                              position: LatLng(latitude, longitude),
-                            )
-                          },
-                          polylines: {
+                          children: [
+                            TileLayer(
+  urlTemplate:
+      'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
+  userAgentPackageName: 'com.example.offline_ride_tracker',
+),
                             if (_deviationService.routePoints.isNotEmpty)
-                              Polyline(
-                                polylineId: const PolylineId("route"),
-                                points: _deviationService.routePoints,
-                                color: Colors.blue,
-                                width: 4,
-                              )
-                          },
+                              PolylineLayer(
+                                polylines: [
+                                  Polyline(
+                                    points: _deviationService.routePoints,
+                                    color: Colors.blue,
+                                    strokeWidth: 4,
+                                  ),
+                                ],
+                              ),
+                            MarkerLayer(
+                              markers: [
+                                Marker(
+                                  point: LatLng(latitude, longitude),
+                                  width: 36,
+                                  height: 36,
+                                  child: Icon(
+                                    Icons.location_on,
+                                    color: Colors.red,
+                                    size: 36,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
                         ),
                         
                       // Floating context dashboard overlaying maps naturally capturing local states
@@ -262,6 +322,22 @@ class _TrackingScreenState extends State<TrackingScreen> {
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 16),
                       backgroundColor: Colors.blue.shade600,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _clearTileCache,
+                    icon: const Icon(Icons.delete_forever),
+                    label: const Text('Clear Tile Cache'),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      backgroundColor: Colors.grey.shade700,
                       foregroundColor: Colors.white,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),

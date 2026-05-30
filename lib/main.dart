@@ -1,7 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'screens/tracking_screen.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  //await dotenv.load(fileName: '.env');
+  // Initialize the flutter_map_tile_caching store used by the app
+  // Tile caching plugin can be initialized here if desired (FMTC API).
   runApp(const OfflineRideTrackerApp());
 }
 
