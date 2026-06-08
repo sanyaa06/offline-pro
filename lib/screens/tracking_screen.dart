@@ -21,6 +21,24 @@ class TrackingScreen extends StatefulWidget {
 }
 
 class _TrackingScreenState extends State<TrackingScreen> {
+  double remainingDistanceMeters = 0;
+double remainingDurationSeconds = 0;
+
+  double distanceFromRouteMeters = 0;
+
+double originalRouteDistanceMeters = 0;
+double originalRouteDurationSeconds = 0;
+
+double alternativeRouteDistanceMeters = 0;
+double alternativeRouteDurationSeconds = 0;
+
+double? destinationLatitude;
+double? destinationLongitude;
+
+String routeRiskStatus = "On Route";
+
+DateTime? warningStartedAt;
+DateTime? lastAlternativeRouteCheck;
   final LocationService _locationService = LocationService();
   final DeviationService _deviationService = DeviationService();
   final ConfidenceService _confidenceService = ConfidenceService();
@@ -33,7 +51,9 @@ class _TrackingScreenState extends State<TrackingScreen> {
   bool isLoadingRoute = false;
 
   final MapController _mapController = MapController();
-  final double _mapZoom = 19;
+
+
+  double _currentZoom = 16;
 
   final List<LatLng> _routeHistory = [];
   final List<LatLng> _expectedRoutePoints = [];
@@ -44,6 +64,25 @@ class _TrackingScreenState extends State<TrackingScreen> {
   String? _destinationName;
 
   StreamSubscription<Position>? _positionSubscription;
+
+  String _formatDistance(double meters) {
+  if (meters >= 1000) {
+    return "${(meters / 1000).toStringAsFixed(1)} km";
+  }
+  return "${meters.toStringAsFixed(0)} m";
+}
+
+String _formatDuration(double seconds) {
+  final int minutes = (seconds / 60).round();
+
+  if (minutes >= 60) {
+    final int hours = minutes ~/ 60;
+    final int remainingMinutes = minutes % 60;
+    return "${hours}h ${remainingMinutes}m";
+  }
+
+  return "${minutes} min";
+}
 
   @override
   void initState() {
@@ -128,7 +167,8 @@ class _TrackingScreenState extends State<TrackingScreen> {
       }
     });
 
-    _mapController.move(newPoint, _mapZoom);
+    _mapController.move(newPoint, _currentZoom);
+    _evaluateRouteRisk();
   }
 
   bool _isCurrentLocationOnExpectedRoute() {
@@ -150,6 +190,92 @@ class _TrackingScreenState extends State<TrackingScreen> {
 
     return nearestDistance <= 120;
   }
+
+  Future<void> _evaluateRouteRisk() async {
+  if (_expectedRoutePoints.isEmpty ||
+      destinationLatitude == null ||
+      destinationLongitude == null) {
+    setState(() {
+      routeRiskStatus = "On Route";
+    });
+    return;
+  }
+
+  final bool currentlyOnRoute = _isCurrentLocationOnExpectedRoute();
+
+  if (currentlyOnRoute) {
+    setState(() {
+      routeRiskStatus = "On Route";
+      warningStartedAt = null;
+    });
+    return;
+  }
+
+  final now = DateTime.now();
+
+  if (lastAlternativeRouteCheck != null &&
+      now.difference(lastAlternativeRouteCheck!).inSeconds < 15) {
+    return;
+  }
+
+  lastAlternativeRouteCheck = now;
+
+  try {
+    final String url =
+        'https://router.project-osrm.org/route/v1/driving/'
+        '$longitude,$latitude;'
+        '$destinationLongitude,$destinationLatitude'
+        '?overview=false&geometries=geojson';
+
+    final response = await http.get(Uri.parse(url));
+
+    if (response.statusCode != 200) {
+      setState(() {
+        routeRiskStatus = "Unusual Route Detected";
+      });
+      return;
+    }
+
+    final data = jsonDecode(response.body);
+    final route = data['routes'][0];
+
+    alternativeRouteDistanceMeters =
+        (route['distance'] as num).toDouble();
+
+    alternativeRouteDurationSeconds =
+        (route['duration'] as num).toDouble();
+
+      remainingDistanceMeters = alternativeRouteDistanceMeters;
+remainingDurationSeconds = alternativeRouteDurationSeconds;
+
+    final double etaIncreaseRatio =
+        (alternativeRouteDurationSeconds - originalRouteDurationSeconds) /
+            originalRouteDurationSeconds;
+
+    setState(() {
+      if (etaIncreaseRatio <= 0.20) {
+        routeRiskStatus = "Alternative Route Detected";
+        warningStartedAt = null;
+      } else if (etaIncreaseRatio <= 0.40) {
+        routeRiskStatus = "Unusual Route Detected";
+        warningStartedAt ??= DateTime.now();
+      } else {
+        warningStartedAt ??= DateTime.now();
+
+        final int warningSeconds =
+            DateTime.now().difference(warningStartedAt!).inSeconds;
+
+        if (warningSeconds >= 120) {
+          routeRiskStatus = "Safety Alert";
+        } else {
+          routeRiskStatus = "Unusual Route Detected";
+        }
+      }
+    });
+  } catch (e) {
+    debugPrint("Route risk check failed: $e");
+  }
+}
 
   Future<void> _navigateToDestination() async {
     final String destination = _destinationController.text.trim();
@@ -187,6 +313,20 @@ class _TrackingScreenState extends State<TrackingScreen> {
       }
 
       final Map<String, dynamic> data = jsonDecode(response.body);
+
+      final route = data['routes'][0];
+
+originalRouteDistanceMeters =
+    (route['distance'] as num).toDouble();
+
+originalRouteDurationSeconds =
+    (route['duration'] as num).toDouble();
+
+    remainingDistanceMeters = originalRouteDistanceMeters;
+remainingDurationSeconds = originalRouteDurationSeconds;
+
+destinationLatitude = destinationLat;
+destinationLongitude = destinationLng;
 
       if (data['routes'] == null || data['routes'].isEmpty) {
         _showMessage("No route found");
@@ -262,7 +402,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
       _routeHistory.add(predictedPoint);
     });
 
-    _mapController.move(predictedPoint, _mapZoom);
+    _mapController.move(predictedPoint, _currentZoom);
   }
 
   void _toggleNetwork() {
@@ -420,7 +560,12 @@ class _TrackingScreenState extends State<TrackingScreen> {
                           mapController: _mapController,
                           options: MapOptions(
                             initialCenter: LatLng(latitude, longitude),
-                            initialZoom: _mapZoom,
+                            initialZoom: _currentZoom,
+                            onPositionChanged: (position, hasGesture){
+    if (hasGesture && position.zoom != null) {
+      _currentZoom = position.zoom!;
+    }
+                            }
                           ),
                           children: [
                             TileLayer(
@@ -520,6 +665,29 @@ class _TrackingScreenState extends State<TrackingScreen> {
                                   color: confidenceColor,
                                 ),
                               ),
+                              Text(
+  'Distance from Route: ${distanceFromRouteMeters.toStringAsFixed(0)} m',
+  style: const TextStyle(
+    fontSize: 12,
+    color: Colors.black87,
+  ),
+),
+
+Text(
+  'Remaining: ${_formatDistance(remainingDistanceMeters)}',
+  style: const TextStyle(
+    fontSize: 12,
+    color: Colors.black87,
+  ),
+),
+
+Text(
+  'ETA: ${_formatDuration(remainingDurationSeconds)}',
+  style: const TextStyle(
+    fontSize: 12,
+    color: Colors.black87,
+  ),
+),
                               const SizedBox(height: 4),
                               Text(
                                 'Actual Points: ${_routeHistory.length}',
@@ -555,7 +723,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Text(
-                !onRoute ? 'Route Deviation Detected' : 'On Route',
+                routeRiskStatus,
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: !onRoute ? Colors.red.shade900 : Colors.green.shade900,
