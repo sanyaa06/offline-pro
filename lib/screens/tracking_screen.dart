@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_map/flutter_map.dart';
+import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
 import '../services/location_service.dart';
@@ -27,10 +30,18 @@ class _TrackingScreenState extends State<TrackingScreen> {
   bool isOffline = false;
   int offlineSteps = 0;
   bool onRoute = true;
+  bool isLoadingRoute = false;
 
   final MapController _mapController = MapController();
   final double _mapZoom = 19;
+
   final List<LatLng> _routeHistory = [];
+  final List<LatLng> _expectedRoutePoints = [];
+
+  final TextEditingController _destinationController =
+      TextEditingController();
+
+  String? _destinationName;
 
   StreamSubscription<Position>? _positionSubscription;
 
@@ -41,7 +52,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
     _deviationService.loadRoute().then((_) {
       if (mounted) {
         setState(() {
-          onRoute = _deviationService.isOnRoute(latitude, longitude);
+          onRoute = _isCurrentLocationOnExpectedRoute();
         });
       }
     });
@@ -110,7 +121,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
       latitude = lat;
       longitude = lng;
       offlineSteps = 0;
-      onRoute = _deviationService.isOnRoute(latitude, longitude);
+      onRoute = _isCurrentLocationOnExpectedRoute();
 
       if (_routeHistory.isEmpty || _routeHistory.last != newPoint) {
         _routeHistory.add(newPoint);
@@ -120,6 +131,101 @@ class _TrackingScreenState extends State<TrackingScreen> {
     _mapController.move(newPoint, _mapZoom);
   }
 
+  bool _isCurrentLocationOnExpectedRoute() {
+    if (_expectedRoutePoints.isEmpty) {
+      return true;
+    }
+
+    const Distance distance = Distance();
+    final LatLng currentPoint = LatLng(latitude, longitude);
+
+    double nearestDistance = double.infinity;
+
+    for (final point in _expectedRoutePoints) {
+      final double currentDistance = distance(currentPoint, point);
+      if (currentDistance < nearestDistance) {
+        nearestDistance = currentDistance;
+      }
+    }
+
+    return nearestDistance <= 120;
+  }
+
+  Future<void> _navigateToDestination() async {
+    final String destination = _destinationController.text.trim();
+
+    if (destination.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      isLoadingRoute = true;
+    });
+
+    try {
+      final List<Location> locations = await locationFromAddress(destination);
+
+      if (locations.isEmpty) {
+        _showMessage("Destination not found");
+        return;
+      }
+
+      final double destinationLat = locations.first.latitude;
+      final double destinationLng = locations.first.longitude;
+
+      final String url =
+          'https://router.project-osrm.org/route/v1/driving/'
+          '$longitude,$latitude;'
+          '$destinationLng,$destinationLat'
+          '?overview=full&geometries=geojson';
+
+      final http.Response response = await http.get(Uri.parse(url));
+
+      if (response.statusCode != 200) {
+        _showMessage("Could not fetch route");
+        return;
+      }
+
+      final Map<String, dynamic> data = jsonDecode(response.body);
+
+      if (data['routes'] == null || data['routes'].isEmpty) {
+        _showMessage("No route found");
+        return;
+      }
+
+      final List coordinates =
+          data['routes'][0]['geometry']['coordinates'] as List;
+
+      final List<LatLng> routePoints = coordinates
+          .map(
+            (coord) => LatLng(
+              (coord[1] as num).toDouble(),
+              (coord[0] as num).toDouble(),
+            ),
+          )
+          .toList();
+
+      setState(() {
+        _destinationName = destination;
+        _expectedRoutePoints
+          ..clear()
+          ..addAll(routePoints);
+        onRoute = _isCurrentLocationOnExpectedRoute();
+      });
+
+      _showMessage("Route loaded to $destination");
+    } catch (e) {
+      debugPrint("Destination error: $e");
+      _showMessage("Failed to load destination");
+    } finally {
+      if (mounted) {
+        setState(() {
+          isLoadingRoute = false;
+        });
+      }
+    }
+  }
+
   Future<void> _clearTileCache() async {
     try {
       PaintingBinding.instance.imageCache.clear();
@@ -127,11 +233,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
       debugPrint('ImageCache clear failed: $e');
     }
 
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Tile cache cleared')),
-      );
-    }
+    _showMessage('Tile cache cleared');
   }
 
   void _moveForward() {
@@ -156,7 +258,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
         offlineSteps = 0;
       }
 
-      onRoute = _deviationService.isOnRoute(latitude, longitude);
+      onRoute = _isCurrentLocationOnExpectedRoute();
       _routeHistory.add(predictedPoint);
     });
 
@@ -178,9 +280,18 @@ class _TrackingScreenState extends State<TrackingScreen> {
     }
   }
 
+  void _showMessage(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
   @override
   void dispose() {
     _stopLocationTracking();
+    _destinationController.dispose();
     super.dispose();
   }
 
@@ -229,6 +340,48 @@ class _TrackingScreenState extends State<TrackingScreen> {
                 ),
               ),
             ),
+
+            const SizedBox(height: 16),
+
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _destinationController,
+                    decoration: const InputDecoration(
+                      labelText: "Enter destination",
+                      hintText: "Example: Jaipur Railway Station",
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: isLoadingRoute ? null : _navigateToDestination,
+                  child: isLoadingRoute
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text("Go"),
+                ),
+              ],
+            ),
+
+            if (_destinationName != null) ...[
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  "Destination: $_destinationName",
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+
             const SizedBox(height: 16),
 
             Expanded(
@@ -237,8 +390,9 @@ class _TrackingScreenState extends State<TrackingScreen> {
                 child: Container(
                   decoration: BoxDecoration(
                     border: Border.all(
-                      color:
-                          isOffline ? Colors.orange.shade300 : Colors.blue.shade300,
+                      color: isOffline
+                          ? Colors.orange.shade300
+                          : Colors.blue.shade300,
                       width: 3,
                     ),
                     borderRadius: BorderRadius.circular(16),
@@ -276,11 +430,11 @@ class _TrackingScreenState extends State<TrackingScreen> {
                                   'com.example.offline_ride_tracker',
                             ),
 
-                            if (_deviationService.routePoints.isNotEmpty)
+                            if (_expectedRoutePoints.isNotEmpty)
                               PolylineLayer(
                                 polylines: [
                                   Polyline(
-                                    points: _deviationService.routePoints,
+                                    points: _expectedRoutePoints,
                                     color: Colors.blue,
                                     strokeWidth: 4,
                                   ),
@@ -368,7 +522,14 @@ class _TrackingScreenState extends State<TrackingScreen> {
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                'Route Points: ${_routeHistory.length}',
+                                'Actual Points: ${_routeHistory.length}',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.black87,
+                                ),
+                              ),
+                              Text(
+                                'Expected Points: ${_expectedRoutePoints.length}',
                                 style: const TextStyle(
                                   fontSize: 12,
                                   color: Colors.black87,
@@ -418,8 +579,9 @@ class _TrackingScreenState extends State<TrackingScreen> {
                     ),
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 16),
-                      backgroundColor:
-                          isOffline ? Colors.blue.shade600 : Colors.grey.shade400,
+                      backgroundColor: isOffline
+                          ? Colors.blue.shade600
+                          : Colors.grey.shade400,
                       foregroundColor: Colors.white,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
