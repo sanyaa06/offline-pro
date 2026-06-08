@@ -1,11 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart';
-import 'package:flutter/painting.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:latlong2/latlong.dart';
 
-// Import our newly separated basic architecture logic context!
 import '../services/location_service.dart';
 import '../services/deviation_service.dart';
 import '../services/confidence_service.dart';
@@ -18,56 +18,26 @@ class TrackingScreen extends StatefulWidget {
 }
 
 class _TrackingScreenState extends State<TrackingScreen> {
-  // --- 1. Service Instantiations ---
-  // These handle all backend logic so the UI widget stays perfectly clean!
   final LocationService _locationService = LocationService();
   final DeviationService _deviationService = DeviationService();
   final ConfidenceService _confidenceService = ConfidenceService();
 
-  // --- 2. State Variables ---
-  // Minimal attributes required to paint tracking canvas natively
   double latitude = 12.9716;
   double longitude = 77.5946;
   bool isOffline = false;
   int offlineSteps = 0;
   bool onRoute = true;
+
   final MapController _mapController = MapController();
-  final double _mapZoom = 15;
+  final double _mapZoom = 19;
+  final List<LatLng> _routeHistory = [];
 
-  Future<void> _getCurrentLocation() async {
-  bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-
-  if (!serviceEnabled) {
-    return;
-  }
-
-  LocationPermission permission = await Geolocator.checkPermission();
-
-  if (permission == LocationPermission.denied) {
-    permission = await Geolocator.requestPermission();
-  }
-
-  Position position = await Geolocator.getCurrentPosition(
-    desiredAccuracy: LocationAccuracy.high,
-  );
-
-  setState(() {
-    latitude = position.latitude;
-    longitude = position.longitude;
-  });
-
-  _mapController.move(
-    LatLng(latitude, longitude),
-    _mapZoom,
-  );
-}
+  StreamSubscription<Position>? _positionSubscription;
 
   @override
-  @override
-void initState() {
-  super.initState();
-  _getCurrentLocation();
-    // We defer to the DeviationService internally to fetch layout mappings securely
+  void initState() {
+    super.initState();
+
     _deviationService.loadRoute().then((_) {
       if (mounted) {
         setState(() {
@@ -75,71 +45,161 @@ void initState() {
         });
       }
     });
+
+    _initializeLocationTracking();
+  }
+
+  Future<void> _initializeLocationTracking() async {
+    final bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+
+    if (!serviceEnabled) {
+      debugPrint("Location services are disabled.");
+      return;
+    }
+
+    LocationPermission permission = await Geolocator.checkPermission();
+
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      debugPrint("Location permission denied.");
+      return;
+    }
+
+    final Position position = await Geolocator.getCurrentPosition(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+      ),
+    );
+
+    if (!mounted) return;
+
+    _updateLocation(position.latitude, position.longitude);
+    _subscribeToPositionStream();
+  }
+
+  void _subscribeToPositionStream() {
+    _positionSubscription?.cancel();
+
+    _positionSubscription = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 0,
+      ),
+    ).listen((Position position) {
+      debugPrint("LIVE GPS: ${position.latitude}, ${position.longitude}");
+
+      if (!mounted || isOffline) return;
+
+      _updateLocation(position.latitude, position.longitude);
+    });
+  }
+
+  void _stopLocationTracking() {
+    _positionSubscription?.cancel();
+    _positionSubscription = null;
+  }
+
+  void _updateLocation(double lat, double lng) {
+    final LatLng newPoint = LatLng(lat, lng);
+
+    setState(() {
+      latitude = lat;
+      longitude = lng;
+      offlineSteps = 0;
+      onRoute = _deviationService.isOnRoute(latitude, longitude);
+
+      if (_routeHistory.isEmpty || _routeHistory.last != newPoint) {
+        _routeHistory.add(newPoint);
+      }
+    });
+
+    _mapController.move(newPoint, _mapZoom);
   }
 
   Future<void> _clearTileCache() async {
-    // Clear Flutter image cache
     try {
       PaintingBinding.instance.imageCache.clear();
     } catch (e) {
       debugPrint('ImageCache clear failed: $e');
     }
 
-    // Note: If using flutter_map_tile_caching (FMTC), clear it here.
-    // Example (replace with FMTC API if used):
-    // await FMTC.instance('mapStore').manage.clearAll();
-
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Tile cache cleared')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Tile cache cleared')),
+      );
     }
   }
 
-  /// 6. Maintain Data Pipeline synchronously via simple decoupled methods
   void _moveForward() {
-    setState(() {
-      // 1. Update location (LocationService seamlessly resolves prediction internal fallback dynamically)
-      final newLoc = _locationService.moveForward(latitude, longitude, isOffline);
-      latitude = newLoc['lat']!;
-      longitude = newLoc['lng']!;
+    final newLoc = _locationService.moveForward(
+      latitude,
+      longitude,
+      isOffline,
+    );
 
-      // 2. Update offline steps simulation sequentially securely
+    final LatLng predictedPoint = LatLng(
+      newLoc['lat']!,
+      newLoc['lng']!,
+    );
+
+    setState(() {
+      latitude = predictedPoint.latitude;
+      longitude = predictedPoint.longitude;
+
       if (isOffline) {
         offlineSteps++;
       } else {
         offlineSteps = 0;
       }
 
-      // 3 & 4. Run deviation layout resolving bounds securely natively using pure math Service bounds
       onRoute = _deviationService.isOnRoute(latitude, longitude);
+      _routeHistory.add(predictedPoint);
     });
 
-    // 5. Update Map UI externally
-    _mapController.move(LatLng(latitude, longitude), _mapZoom);
+    _mapController.move(predictedPoint, _mapZoom);
   }
 
-  /// System logic toggling testing fallback conditions natively
   void _toggleNetwork() {
     setState(() {
       isOffline = !isOffline;
-      if (!isOffline) {
-        offlineSteps = 0; // Decay simulation resets cleanly back to High confidence
-        onRoute = _deviationService.isOnRoute(latitude, longitude);
+
+      if (isOffline) {
+        _stopLocationTracking();
+        offlineSteps = 0;
       }
     });
+
+    if (!isOffline) {
+      _initializeLocationTracking();
+    }
+  }
+
+  @override
+  void dispose() {
+    _stopLocationTracking();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    // 3. Resolve confidence score off abstracted confidence service securely
-    String confidence = _confidenceService.getConfidence(isOffline, offlineSteps);
+    final String confidence =
+        _confidenceService.getConfidence(isOffline, offlineSteps);
 
-    // Resolve context color mapping naturally natively
     Color confidenceColor;
+
     if (confidence == "High" && !isOffline) {
       confidenceColor = Colors.blue.shade800;
-    } else if (confidence == "High") confidenceColor = Colors.orange.shade800;
-    else if (confidence == "Medium") confidenceColor = Colors.deepOrange.shade800;
-    else confidenceColor = Colors.red.shade900;
+    } else if (confidence == "High") {
+      confidenceColor = Colors.orange.shade800;
+    } else if (confidence == "Medium") {
+      confidenceColor = Colors.deepOrange.shade800;
+    } else {
+      confidenceColor = Colors.red.shade900;
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -149,7 +209,6 @@ void initState() {
         padding: const EdgeInsets.all(16.0),
         child: Column(
           children: [
-            // --- UI: Mode Display ---
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(vertical: 16),
@@ -158,33 +217,34 @@ void initState() {
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Text(
-                isOffline ? 'Offline Mode – Estimated Tracking Active' : 'Online Mode',
+                isOffline
+                    ? 'Offline Mode – Estimated Tracking Active'
+                    : 'Online Mode',
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                  color: isOffline ? Colors.red.shade900 : Colors.green.shade900,
+                  color:
+                      isOffline ? Colors.red.shade900 : Colors.green.shade900,
                   fontWeight: FontWeight.bold,
                   fontSize: 16,
                 ),
               ),
             ),
-            
             const SizedBox(height: 16),
-            
-            // --- UI: Central Information Hub / Map Layout ---
+
             Expanded(
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(16),
                 child: Container(
                   decoration: BoxDecoration(
                     border: Border.all(
-                      color: isOffline ? Colors.orange.shade300 : Colors.blue.shade300,
+                      color:
+                          isOffline ? Colors.orange.shade300 : Colors.blue.shade300,
                       width: 3,
                     ),
                     borderRadius: BorderRadius.circular(16),
                   ),
                   child: Stack(
                     children: [
-                      // Hardcoded platform filter catching chrome map deployment crashing internally natively
                       if (kIsWeb)
                         Container(
                           color: Colors.grey.shade200,
@@ -193,7 +253,10 @@ void initState() {
                             padding: EdgeInsets.all(24.0),
                             child: Text(
                               "Map not supported on web. Use mobile device.",
-                              style: TextStyle(fontWeight: FontWeight.bold, color: Colors.black54),
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: Colors.black54,
+                              ),
                               textAlign: TextAlign.center,
                             ),
                           ),
@@ -207,10 +270,12 @@ void initState() {
                           ),
                           children: [
                             TileLayer(
-  urlTemplate:
-      'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
-  userAgentPackageName: 'com.example.offline_ride_tracker',
-),
+                              urlTemplate:
+                                  'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
+                              userAgentPackageName:
+                                  'com.example.offline_ride_tracker',
+                            ),
+
                             if (_deviationService.routePoints.isNotEmpty)
                               PolylineLayer(
                                 polylines: [
@@ -221,13 +286,27 @@ void initState() {
                                   ),
                                 ],
                               ),
+
+                            if (_routeHistory.length > 1)
+                              PolylineLayer(
+                                polylines: [
+                                  Polyline(
+                                    points: _routeHistory,
+                                    color: isOffline
+                                        ? Colors.orange
+                                        : Colors.green,
+                                    strokeWidth: 5,
+                                  ),
+                                ],
+                              ),
+
                             MarkerLayer(
                               markers: [
                                 Marker(
                                   point: LatLng(latitude, longitude),
                                   width: 36,
                                   height: 36,
-                                  child: Icon(
+                                  child: const Icon(
                                     Icons.location_on,
                                     color: Colors.red,
                                     size: 36,
@@ -237,13 +316,15 @@ void initState() {
                             ),
                           ],
                         ),
-                        
-                      // Floating context dashboard overlaying maps naturally capturing local states
+
                       Positioned(
                         top: 10,
                         left: 10,
                         child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 8,
+                          ),
                           decoration: BoxDecoration(
                             color: Colors.white.withOpacity(0.95),
                             borderRadius: BorderRadius.circular(8),
@@ -258,16 +339,23 @@ void initState() {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                isOffline ? 'Predicted Location' : 'Actual Location',
+                                isOffline
+                                    ? 'Predicted Location'
+                                    : 'Actual Location',
                                 style: TextStyle(
                                   fontWeight: FontWeight.bold,
-                                  color: isOffline ? Colors.orange.shade900 : Colors.blue.shade900,
+                                  color: isOffline
+                                      ? Colors.orange.shade900
+                                      : Colors.blue.shade900,
                                 ),
                               ),
                               const SizedBox(height: 4),
                               Text(
                                 "Lat: ${latitude.toStringAsFixed(5)}, Lng: ${longitude.toStringAsFixed(5)}",
-                                style: const TextStyle(fontSize: 12, color: Colors.black87),
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.black87,
+                                ),
                               ),
                               const SizedBox(height: 4),
                               Text(
@@ -276,6 +364,14 @@ void initState() {
                                   fontSize: 13,
                                   fontWeight: FontWeight.w600,
                                   color: confidenceColor,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Route Points: ${_routeHistory.length}',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.black87,
                                 ),
                               ),
                             ],
@@ -287,10 +383,9 @@ void initState() {
                 ),
               ),
             ),
-            
+
             const SizedBox(height: 16),
-            
-            // --- UI: Route Status Context Boolean Display ---
+
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(vertical: 16),
@@ -308,20 +403,23 @@ void initState() {
                 ),
               ),
             ),
-            
+
             const SizedBox(height: 16),
-            
-            // --- Action Testing Logic Connectors ---
+
             Row(
               children: [
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed: _moveForward,
+                    onPressed: isOffline ? _moveForward : null,
                     icon: const Icon(Icons.arrow_forward),
-                    label: const Text('Move Forward', style: TextStyle(fontWeight: FontWeight.bold)),
+                    label: const Text(
+                      'Move Forward',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 16),
-                      backgroundColor: Colors.blue.shade600,
+                      backgroundColor:
+                          isOffline ? Colors.blue.shade600 : Colors.grey.shade400,
                       foregroundColor: Colors.white,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
@@ -350,7 +448,10 @@ void initState() {
                   child: ElevatedButton.icon(
                     onPressed: _toggleNetwork,
                     icon: Icon(isOffline ? Icons.wifi : Icons.wifi_off),
-                    label: const Text('Toggle Network', style: TextStyle(fontWeight: FontWeight.bold)),
+                    label: const Text(
+                      'Toggle Network',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 16),
                       backgroundColor: isOffline ? Colors.green : Colors.red,
@@ -363,6 +464,7 @@ void initState() {
                 ),
               ],
             ),
+
             const SizedBox(height: 24),
           ],
         ),
